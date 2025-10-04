@@ -4,9 +4,9 @@ import os
 from src.api.main import app
 
 # Get the OpenAPI schema
-# Note: The schema is generated from Pydantic models (e.g., ChatRequest) that now
-# include response_style Literal['list','plain','guided']. Regenerating will
-# persist the 'guided' enum into interfaces/openapi.json.
+# Note: The route accepts either a minimal {'message': string} or a full
+# {'messages': [...], 'response_style'?}. Regenerating keeps this description
+# in the OpenAPI schema.
 openapi_schema = app.openapi()
 
 # Write to file

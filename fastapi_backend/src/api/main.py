@@ -65,10 +65,15 @@ def chat_preflight():
     "/api/chat",
     response_model=ChatResponse,
     summary="Generate assistant reply",
-    description="Accepts a list of chat messages and returns a concise assistant reply.",
+    description="Accepts either a minimal {'message': string} or a full {'messages': [...], 'response_style'?} payload and returns a concise assistant reply.",
     tags=["Chat"],
 )
-async def chat(body: Dict[str, Any] = Body(..., description="Either {'messages': [...]} or legacy {'message': '...'} payload")):
+async def chat(
+    body: Dict[str, Any] = Body(
+        ...,
+        description="Minimal: {'message': '...'}; or Rich: {'messages': [{role,content}], 'response_style'?: 'plain'|'list'|'guided'}",
+    )
+):
     """
     Generate a reply from the assistant based on prior messages.
 
@@ -76,13 +81,13 @@ async def chat(body: Dict[str, Any] = Body(..., description="Either {'messages':
     ----------
     body : dict
         The raw chat request payload. Accepted shapes:
-        - {'messages': [{role, content}, ...], 'response_style'?: 'plain'|'list'|'guided'}
-        - {'message': '...'} (legacy)
+        - Minimal: {'message': '...'}
+        - Rich: {'messages': [{role:'user'|'assistant'|'system', content:'...'}, ...], 'response_style'?: 'plain'|'list'|'guided'}
 
     Example payloads
     ----------------
-    1) {'messages':[{'role':'user','content':'What is water?'}], 'response_style':'plain'}
-    2) {'message':'Give me examples of vegetables'}
+    1) {'message':'What is water?'}
+    2) {'messages':[{'role':'user','content':'Give me examples of vegetables'}], 'response_style':'list'}
 
     Returns
     -------

@@ -21,8 +21,9 @@ OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
 # Default, neutral, concise assistant prompt (kept short)
+# Neutral, concise assistant prompt per requirements
 SYSTEM_PROMPT_BASE = (
-    "You are a concise, helpful assistant. Answer clearly and directly."
+    "You are a helpful and concise assistant. Answer user questions clearly and directly."
 )
 
 # Light hints only when requested

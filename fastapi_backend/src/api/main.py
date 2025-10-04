@@ -132,6 +132,7 @@ async def chat(
                 "validation": str(ve),
                 "route": "/api/chat",
                 "note": "This route accepts either {message: string} or {messages: [{role, content}], response_style?}.",
+                "diagnostic": "normalize_to_chat_request.validation_error",
             }
             raise HTTPException(status_code=400, detail=detail) from ve
 
@@ -140,6 +141,23 @@ async def chat(
             reply_text = await asyncio.wait_for(
                 generate_reply(normalized.messages, response_style=normalized.response_style),
                 timeout=13.0,
+            )
+        except asyncio.TimeoutError:
+            # Inner timeout while awaiting generate_reply should be rare; map to 504.
+            total_ms = int((perf_counter() - total_start) * 1000)
+            logger.warning("Upstream chat service timed out after %d ms", total_ms)
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "error": {
+                        "code": "gateway_timeout",
+                        "message": "The assistant took too long to respond. Please try again.",
+                        "hint": "This may be due to an upstream AI timeout.",
+                        "duration_ms": total_ms,
+                        "route": "/api/chat",
+                        "diagnostic": "route.await.generate_reply.timeout",
+                    }
+                },
             )
         except Exception as upstream:
             # Treat unexpected upstream errors as Bad Gateway, not as 400.
@@ -154,6 +172,7 @@ async def chat(
                         "hint": "Please try again soon.",
                         "duration_ms": total_ms,
                         "route": "/api/chat",
+                        "diagnostic": "route.await.generate_reply.exception",
                     }
                 },
             )
@@ -173,6 +192,7 @@ async def chat(
                     "hint": "This may be due to an upstream AI timeout.",
                     "duration_ms": total_ms,
                     "route": "/api/chat",
+                    "diagnostic": "route.timeout",
                 }
             },
         )
@@ -193,6 +213,7 @@ async def chat(
                     "hint": "Please try again.",
                     "duration_ms": total_ms,
                     "route": "/api/chat",
+                    "diagnostic": "route.unexpected_exception",
                 }
             },
         )

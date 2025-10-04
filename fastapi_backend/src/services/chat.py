@@ -1,16 +1,8 @@
-from __future__ import annotations
-
-import asyncio
-import logging
-from time import perf_counter
 from typing import List, Optional
 
 import httpx
 from src.api.schemas import Message, RoleEnum
 from src.config import settings
-
-# Module-level logger
-logger = logging.getLogger(__name__)
 
 MAX_INPUT_CHARS = 5000
 DEFAULT_GREETING = (
@@ -20,31 +12,25 @@ DEFAULT_GREETING = (
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
-# Default, neutral, concise assistant prompt (kept short)
-# Neutral, concise assistant prompt per requirements
+# Default, neutral, concise assistant prompt.
 SYSTEM_PROMPT_BASE = (
     "You are a helpful and concise assistant. Answer user questions clearly and directly."
 )
 
-# Light hints only when requested
+# When the caller wants list-style replies, add a style bias.
 SYSTEM_PROMPT_LIST_HINT = (
-    "If the user wants examples or items, use a short list without preamble."
+    "When the user asks for examples or items, respond as a concise bulleted list or a short, comma-separated list. "
+    "Do not add meta-instructions or commentary—just the items or brief bullets."
 )
+
+# Optional guided mode: provide steps/examples only when appropriate.
 SYSTEM_PROMPT_GUIDED = (
-    "If the user asks for steps/how-to, provide brief, numbered steps; otherwise answer plainly."
+    "You are a helpful assistant. If the user is asking how to do something, break it into steps and include an example. "
+    "For factual questions, respond clearly and concisely."
 )
 
 # Safety truncation limits for responses (final safeguard)
 MAX_RESPONSE_CHARS = 4000
-
-# Async call timeout in seconds for OpenAI segment
-OPENAI_CALL_TIMEOUT_S = 12.0  # strict inner budget
-
-# Per-request httpx timeout (connect+read)
-HTTPX_PER_REQUEST_TIMEOUT_S = 11.5  # must be <= OPENAI_CALL_TIMEOUT_S
-
-# One quick retry backoff (exponential-ish)
-RETRY_BACKOFF_BASE_S = 0.3
 
 
 def _openai_is_configured() -> bool:
@@ -68,34 +54,36 @@ def _extract_last_user_message(messages: List[Message]) -> Optional[str]:
 
 def _build_messages_for_openai(messages: List[Message], response_style: Optional[str]) -> List[dict]:
     """
-    Build a minimal messages array for OpenAI.
+    Build the messages array for OpenAI, ensuring we start with a strong system message,
+    carry forward history as-is, and include the last user message verbatim if present.
 
-    Keep prompts short: system + minimal recent context and ensure the latest user
-    message is present last.
+    The response_style may add a format hint to bias list-style outputs or guided responses.
     """
     system_prompt_parts = [SYSTEM_PROMPT_BASE]
     if response_style == "list":
         system_prompt_parts.append(SYSTEM_PROMPT_LIST_HINT)
+        # Extra explicit hint to reduce meta replies for examples
+        system_prompt_parts.append(
+            "Format hint: For 'examples' requests, output a short, concrete list—bullets or comma-separated—no preamble."
+        )
     elif response_style == "guided":
         system_prompt_parts.append(SYSTEM_PROMPT_GUIDED)
     system_prompt = " ".join(system_prompt_parts)
 
     wire_messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
-    # Include up to the last 2-3 messages to keep context tiny (non-blocking size).
-    # Always skip empty content.
-    recent: List[Message] = []
-    for m in reversed(messages):
-        if (m.content or "").strip():
-            recent.append(m)
-        if len(recent) >= 3:
-            break
-    for m in reversed(recent):
-        wire_messages.append({"role": m.role.value, "content": (m.content or "").strip()})
+    # Append all message history in order, skipping empties
+    for m in messages:
+        role = m.role.value
+        content = (m.content or "").strip()
+        if not content:
+            continue
+        wire_messages.append({"role": role, "content": content})
 
-    # Ensure the final user message is last
+    # Ensure last user message appears at the end verbatim if a user message exists and isn't already last
     last_user = _extract_last_user_message(messages)
     if last_user:
+        # If the last appended message isn't the same user content, append it to be explicit.
         if not wire_messages or wire_messages[-1].get("role") != "user" or wire_messages[-1].get("content") != last_user:
             wire_messages.append({"role": "user", "content": last_user})
 
@@ -104,53 +92,24 @@ def _build_messages_for_openai(messages: List[Message], response_style: Optional
 
 def _build_openai_payload(messages: List[Message], response_style: Optional[str]) -> dict:
     """
-    Build payload for OpenAI Chat Completions request with deterministic parameters.
+    Build payload for OpenAI Chat Completions request with deterministic parameters and format hints.
     """
     wire_messages = _build_messages_for_openai(messages, response_style=response_style)
     model = getattr(settings, "OPENAI_MODEL", None) or OPENAI_DEFAULT_MODEL
     return {
         "model": model,
         "messages": wire_messages,
-        "temperature": 0.2,  # deterministic-ish
+        # Deterministic-bias parameters
+        "temperature": 0.2,
         "top_p": 1,
+        # Room for concise lists or short answers
         "max_tokens": 400,
     }
 
 
-async def _call_openai_once(
-    client: httpx.AsyncClient,
-    headers: dict,
-    payload: dict,
-) -> Optional[str]:
+def _call_openai(messages: List[Message], response_style: Optional[str]) -> Optional[str]:
     """
-    Make a single OpenAI request attempt and return the content, or None on failure.
-    """
-    resp = await client.post(OPENAI_CHAT_URL, headers=headers, json=payload)
-    if resp.status_code != 200:
-        # Log status and first 500 chars of body
-        logger.warning("OpenAI non-200: %s body=%s", resp.status_code, resp.text[:500])
-        # Allow retry on 5xx and timeouts; immediate None otherwise
-        if 500 <= resp.status_code < 600:
-            return None
-        return None
-
-    data = resp.json()
-    choices = data.get("choices") or []
-    if not choices:
-        return None
-    message = choices[0].get("message") or {}
-    content = message.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return None
-    content = content.strip()
-    if len(content) > MAX_RESPONSE_CHARS:
-        content = content[:MAX_RESPONSE_CHARS].rstrip()
-    return content
-
-
-async def _call_openai_async(messages: List[Message], response_style: Optional[str]) -> Optional[str]:
-    """
-    Async call to OpenAI Chat Completions API with a strict asyncio timeout and one quick retry.
+    Call OpenAI Chat Completions API and return the assistant's reply text.
     Returns None on any error to allow fallback behavior.
     """
     if not _openai_is_configured():
@@ -166,78 +125,42 @@ async def _call_openai_async(messages: List[Message], response_style: Optional[s
     }
     payload = _build_openai_payload(messages, response_style=response_style)
 
-    async def _attempts() -> Optional[str]:
-        start = perf_counter()
-        attempt = 1
-        # Use async client with per-request timeout to avoid hangs
-        async with httpx.AsyncClient(timeout=HTTPX_PER_REQUEST_TIMEOUT_S) as client:
-            try:
-                content = await _call_openai_once(client, headers, payload)
-                if content is not None:
-                    elapsed_ms = int((perf_counter() - start) * 1000)
-                    logger.info("OpenAI attempt %d succeeded in %d ms", attempt, elapsed_ms)
-                    return content
-
-                # One quick retry for transient issues
-                attempt += 1
-                backoff_s = RETRY_BACKOFF_BASE_S
-                await asyncio.sleep(backoff_s)
-                content = await _call_openai_once(client, headers, payload)
-                elapsed_ms = int((perf_counter() - start) * 1000)
-                if content is not None:
-                    logger.info("OpenAI attempt %d succeeded in %d ms", attempt, elapsed_ms)
-                    return content
-                logger.warning("OpenAI failed after %d attempts in %d ms", attempt, elapsed_ms)
-                return None
-            except httpx.TimeoutException:
-                elapsed_ms = int((perf_counter() - start) * 1000)
-                logger.warning("OpenAI httpx timeout after %d ms", elapsed_ms)
-                # One quick retry after small backoff if time allows; we still return None if second fails
-                try:
-                    await asyncio.sleep(RETRY_BACKOFF_BASE_S)
-                    content = await _call_openai_once(client, headers, payload)
-                    elapsed_ms = int((perf_counter() - start) * 1000)
-                    if content is not None:
-                        logger.info("OpenAI retry after timeout succeeded in %d ms", elapsed_ms)
-                        return content
-                except Exception as e:
-                    logger.exception("OpenAI retry raised after timeout: %s", str(e))
-                return None
-            except httpx.HTTPError as e:
-                elapsed_ms = int((perf_counter() - start) * 1000)
-                logger.exception("OpenAI HTTP error after %d ms: %s", elapsed_ms, str(e))
-                return None
-
-    start_total = perf_counter()
     try:
-        # Strict overall OpenAI segment budget
-        result = await asyncio.wait_for(_attempts(), timeout=OPENAI_CALL_TIMEOUT_S)
-        elapsed_ms = int((perf_counter() - start_total) * 1000)
-        logger.info("OpenAI total segment completed in %d ms", elapsed_ms)
-        return result
-    except asyncio.TimeoutError:
-        elapsed_ms = int((perf_counter() - start_total) * 1000)
-        logger.warning("OpenAI segment timed out after %d ms", elapsed_ms)
-        return None
-    except Exception as e:
-        elapsed_ms = int((perf_counter() - start_total) * 1000)
-        logger.exception("OpenAI unexpected error after %d ms: %s", elapsed_ms, str(e))
+        # 10s timeout as documented in README
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(OPENAI_CHAT_URL, headers=headers, json=payload)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+            message = choices[0].get("message") or {}
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                return None
+            # Safety truncation to avoid overly long replies
+            content = content.strip()
+            if len(content) > MAX_RESPONSE_CHARS:
+                content = content[:MAX_RESPONSE_CHARS].rstrip()
+            return content
+    except Exception:
         return None
 
 
 def _deterministic_fallback_reply(messages: List[Message], response_style: Optional[str]) -> str:
     """
-    Deterministic, neutral fallback when OpenAI is unavailable or errors occur.
+    Deterministic, helpful fallback when OpenAI is unavailable or errors occur.
 
-    Rules:
-    - Provide concise, direct answers.
-    - No hidden templates (no "Define the goal", "2–3 steps", "small example").
-    - Support simple intents like "What is water?" and "examples of vegetables".
+    Heuristic:
+    - If the latest user message includes phrases like "example(s) of", "examples", or mentions "vegetables",
+      return concrete, list-style answers.
+    - Otherwise, provide a concise, actionable reply.
     """
     if not messages:
         return DEFAULT_GREETING
 
-    # Find the latest user message scanning backwards.
+    # Find the latest user message scanning backwards for robustness.
     latest_user: Optional[Message] = None
     for msg in reversed(messages):
         if msg.role == RoleEnum.user:
@@ -252,73 +175,78 @@ def _deterministic_fallback_reply(messages: List[Message], response_style: Optio
         user_text = user_text[:MAX_INPUT_CHARS].rstrip() + "..."
 
     if not user_text:
-        return "Please share a bit more detail about what you need."
+        return "I’m here to help. Could you share a bit more detail about what you need?"
 
     lower = user_text.lower()
+
+    # Prefer list outputs if style hint requests it or the prompt asks for examples
     wants_list = response_style == "list" or ("example" in lower or "examples" in lower or "list" in lower)
 
-    # Specific concise answer for water
-    if "what is water" in lower or lower.strip() == "water?":
-        return "Water is H₂O, a molecule made of two hydrogen atoms and one oxygen atom. It's a colorless, tasteless liquid essential for life."
-
-    # Vegetables examples
     if "vegetable" in lower or "vegetables" in lower:
-        items = ["Carrots", "Broccoli", "Spinach", "Bell peppers", "Cauliflower", "Tomatoes", "Cucumbers"]
         if wants_list:
-            return "\n".join(f"- {x}" for x in items)
+            return "- Carrots\n- Broccoli\n- Spinach\n- Bell peppers\n- Cauliflower\n- Tomatoes\n- Cucumbers"
         else:
-            return ", ".join(items) + "."
+            return "Carrots, broccoli, spinach, bell peppers, cauliflower, tomatoes, cucumbers."
 
-    # Generic examples request
-    if "example" in lower or "examples" in lower:
-        examples = [
-            "Carrots, broccoli, spinach",
-            "Write a simple function that adds two numbers",
-            "Organize tasks by priority and due date",
-        ]
+    if "example" in lower or "examples" in lower or "example of" in lower or "examples of" in lower:
         if wants_list:
-            return "\n".join(f"- {x}" for x in examples)
+            return "- Example 1: A quick, healthy lunch: quinoa, roasted chickpeas, spinach, cherry tomatoes.\n- Example 2: Minimal Python function to add two numbers.\n- Example 3: Three bullet steps to get started on a task."
         else:
-            return "; ".join(examples) + "."
+            return "Example: A quick healthy lunch—quinoa with roasted chickpeas, spinach, and cherry tomatoes."
 
-    # If it's a factual question (what/why/where/when/how) without specific handling, answer briefly.
-    if lower.endswith("?") or lower.startswith(("how", "what", "why", "where", "when")):
-        # Keep neutral and concise without templates
-        return "Here's a concise answer: please provide a bit more context so I can be precise."
+    # Default concise, helpful fallback
+    if lower.endswith("?") or lower.startswith(
+        ("how", "what", "why", "where", "when", "help", "can you", "could you")
+    ):
+        if wants_list:
+            return "- Define the goal.\n- List 2–3 concrete steps.\n- Provide one small example."
+        if response_style == "guided" or lower.startswith(("how", "help", "can you", "could you")):
+            return "- Identify the goal.\n- Break the task into 2–4 clear steps.\n- Example: Show a minimal, concrete illustration."
+        return "Define the goal, list 2–3 concrete steps, and add a small example."
 
-    # Default: neutral, brief response
-    return "Got it. Could you add a bit more detail so I can provide a precise, concise answer?"
+    return "Outline your goal, list 2–3 concrete actions, and include one quick example."
 
 
 # PUBLIC_INTERFACE
-async def generate_reply(messages: List[Message], response_style: Optional[str] = None) -> str:
+def generate_reply(messages: List[Message], response_style: Optional[str] = None) -> str:
     """
-    Generate a reply for the assistant.
+    Generate a concise, friendly assistant reply based on the most recent user message.
 
-    This function is fully async and non-blocking. It uses an asyncio timeout around
-    the OpenAI request, adds lightweight timing logs, and returns a friendly fallback
-    if OpenAI is unavailable or times out.
+    Behavior:
+    - Prepends a strong, task-oriented system prompt that forbids meta-advice.
+    - If OpenAI is configured via OPENAI_API_KEY (and optionally OPENAI_MODEL), call the
+      Chat Completions API non-streaming with temperature=0.2, top_p=1, max_tokens≈400 and return its reply.
+    - Adds a format hint so examples are returned as concise lists or bullets when appropriate.
+    - Explicitly ensures the last user message is included as-is.
+    - On any error or if OpenAI is not configured, fall back to a deterministic reply that
+      detects simple patterns like 'example(s) of' and returns concrete examples.
+
+    Parameters
+    ----------
+    messages : List[Message]
+        The conversation history in chronological order.
+    response_style : Optional[str]
+        Optional hint: 'list' to bias concise list/bulleted responses or 'plain' for short prose.
+
+    Returns
+    -------
+    str
+        A short assistant reply suitable for immediate display in chat.
     """
-    total_start = perf_counter()
-    # Attempt OpenAI path if configured
-    reply: Optional[str] = None
-    if _openai_is_configured():
-        reply = await _call_openai_async(messages, response_style=response_style)
+    ai_reply = _call_openai(messages, response_style=response_style)
+    if isinstance(ai_reply, str) and ai_reply.strip():
+        return ai_reply
 
-        # If timeout or error happened, provide a friendly immediate fallback message
-        if reply is None:
-            elapsed_ms = int((perf_counter() - total_start) * 1000)
-            logger.info("Fallback path after OpenAI failure; total_so_far_ms=%d", elapsed_ms)
-            # Friendly timeout/error fallback
-            return "AI took too long to respond. Please try again."
+    return _deterministic_fallback_reply(messages, response_style=response_style)
 
-    # If not configured or reply still None, use deterministic fallback
-    if not reply:
-        reply_text = _deterministic_fallback_reply(messages, response_style=response_style)
-        elapsed_ms = int((perf_counter() - total_start) * 1000)
-        logger.info("Deterministic fallback reply generated in %d ms", elapsed_ms)
-        return reply_text
 
-    elapsed_ms = int((perf_counter() - total_start) * 1000)
-    logger.info("generate_reply succeeded in %d ms", elapsed_ms)
-    return reply
+def summarize_prompt(prompt: str) -> str:
+    """
+    Produce a minimal, deterministic 'summary-like' hint based on the user's prompt.
+
+    This is not a true summarization—retained for compatibility with prior code.
+    """
+    snippet = " ".join(prompt.split())  # collapse whitespace
+    if len(snippet) > 160:
+        snippet = snippet[:157].rstrip() + "..."
+    return f"focus on: \"{snippet}\""

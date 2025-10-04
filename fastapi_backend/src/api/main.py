@@ -69,6 +69,18 @@ def chat(request: ChatRequest) -> ChatResponse:
     -------
     ChatResponse
         JSON containing the assistant's reply text under the 'reply' field.
+
+    Example payload:
+    {
+      "messages": [
+        {"role": "user", "content": "Give me an example of a healthy lunch with vegetables."}
+      ]
+    }
+
+    Expected:
+    - Backend forwards messages in order with a strong system prompt to OpenAI when configured.
+    - Returns: {"reply": "<concise helpful answer>"}
     """
+    # Pass the request.messages to the service unchanged
     reply_text = generate_reply(request.messages)
     return ChatResponse(reply=reply_text)

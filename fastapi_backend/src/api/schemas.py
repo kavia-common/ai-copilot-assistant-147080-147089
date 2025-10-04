@@ -29,6 +29,9 @@ class ChatRequest(BaseModel):
         default=False,
         description="Whether the response should be streamed. Placeholder, not implemented in this version."
     )
+    # Sanity note:
+    # - The 'messages' list should be ordered oldest->newest, each item like:
+    #   {"role":"user|assistant|system","content":"..."}.
 
 
 # PUBLIC_INTERFACE

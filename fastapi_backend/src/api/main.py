@@ -97,19 +97,38 @@ async def chat(
     total_start = perf_counter()
     try:
         # Normalize incoming payload to ChatRequest model.
+        logger.debug("POST /api/chat raw body: %s", body)
         try:
             normalized: ChatRequest = normalize_to_chat_request(body)
+            logger.debug(
+                "Normalized chat request: %d message(s), response_style=%s",
+                len(normalized.messages),
+                getattr(normalized, "response_style", None),
+            )
         except ValueError as ve:
             # Provide precise 400 with accepted shapes and validation details
             logger.debug("Invalid chat payload received: %s", body)
             detail = {
                 "code": "invalid_payload",
-                "message": "Invalid payload for /api/chat.",
+                "message": "Payload does not match accepted shapes.",
+                "reason": "Invalid field types or values. See 'validation' for specifics.",
                 "accepted_shapes": [
-                    {"messages": [{"role": "user|assistant|system", "content": "string"}], "response_style": "plain|list|guided (optional)"},
-                    {"message": "string"},
+                    {
+                        "messages": [
+                            {"role": "user|assistant|system", "content": "string (1-5000 chars)"}
+                        ],
+                        "response_style": "plain|list|guided (optional)",
+                    },
+                    {"message": "string (1-5000 chars)"},
                 ],
-                "hint": "Ensure 'content' is a non-empty string (1-5000 chars) and 'role' is one of user|assistant|system.",
+                "examples": {
+                    "minimal": {"message": "What is water?"},
+                    "rich": {
+                        "messages": [{"role": "user", "content": "Give me examples of vegetables"}],
+                        "response_style": "list",
+                    },
+                },
+                "hint": "Use role one of user|assistant|system and ensure 'content' is a non-empty string.",
                 "validation": str(ve),
                 "route": "/api/chat",
             }

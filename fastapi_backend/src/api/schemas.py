@@ -84,7 +84,22 @@ def normalize_to_chat_request(data: Dict[str, Any]) -> ChatRequest:
     # Accept legacy shape
     if "message" in data:
         try:
-            legacy = ChatRequestLegacy.model_validate(data)
+            # If provided as a non-string or only whitespace, ensure the error is explicit
+            msg_val = data.get("message")
+            if isinstance(msg_val, str) and not msg_val.strip():
+                raise ValidationError.from_exception_data(
+                    title="ChatRequestLegacy",
+                    line_errors=[
+                        {
+                            "type": "string_too_short",
+                            "loc": ("message",),
+                            "msg": "Message must be a non-empty string",
+                            "input": msg_val,
+                            "ctx": {"min_length": 1},
+                        }
+                    ],
+                )
+            legacy = ChatRequestLegacy.model_validate({"message": msg_val})
         except ValidationError as ve:
             raise ValueError(f"Invalid legacy 'message' payload. Errors: {ve.errors()}") from ve
         # Convert into modern ChatRequest with a single user message

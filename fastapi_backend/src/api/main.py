@@ -1,8 +1,8 @@
-import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.schemas import ChatRequest, ChatResponse
+from src.config import settings
 from src.services.chat import generate_reply
 
 # Initialize FastAPI app with basic metadata (can be expanded later)
@@ -13,12 +13,10 @@ app = FastAPI(
 )
 
 # Configure CORS to allow the frontend origin
-# Environment variable FRONTEND_ORIGIN should be set by deployment/orchestrator.
-# Falls back to http://localhost:3000 for local development.
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+# FRONTEND_ORIGIN comes from centralized settings (env-backed).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=[settings.FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

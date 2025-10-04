@@ -2,16 +2,20 @@
 Configuration module for the FastAPI backend.
 
 This module centralizes environment-based configuration, including optional
-Supabase settings. Values are loaded from environment variables, with safe
-defaults where appropriate.
+Supabase settings and optional OpenAI settings. Values are loaded from
+environment variables, with safe defaults where appropriate.
 
 Environment variables:
 - FRONTEND_ORIGIN: Allowed CORS origin for the frontend (default: http://localhost:3000)
+
 - ENABLE_SUPABASE: Whether Supabase integration is enabled ("true"/"false", default: false)
 - SUPABASE_URL: Supabase project URL (optional)
 - SUPABASE_SERVICE_ROLE_KEY: Supabase service role key (optional, sensitive)
 - SUPABASE_ANON_KEY: Supabase anonymous key (optional, used by frontend or limited server use)
 - SUPABASE_JWT_SECRET: Supabase JWT secret (optional, sensitive)
+
+- OPENAI_API_KEY: Optional API key for OpenAI Chat Completions (server-side only)
+- OPENAI_MODEL: Optional model name for OpenAI Chat Completions (default: gpt-4o-mini)
 """
 from __future__ import annotations
 
@@ -50,6 +54,10 @@ class Settings:
     SUPABASE_SERVICE_ROLE_KEY: Optional[str] = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or None
     SUPABASE_ANON_KEY: Optional[str] = os.getenv("SUPABASE_ANON_KEY") or None
     SUPABASE_JWT_SECRET: Optional[str] = os.getenv("SUPABASE_JWT_SECRET") or None
+
+    # Optional OpenAI configuration (server-only; never expose to frontend)
+    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY") or None
+    OPENAI_MODEL: Optional[str] = os.getenv("OPENAI_MODEL") or None
 
     # PUBLIC_INTERFACE
     @staticmethod

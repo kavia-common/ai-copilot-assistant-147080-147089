@@ -56,7 +56,7 @@ def chat_preflight():
     description="Accepts a list of chat messages and returns a concise assistant reply.",
     tags=["Chat"],
 )
-def chat(request: ChatRequest) -> ChatResponse:
+async def chat(request: ChatRequest) -> ChatResponse:
     """
     Generate a reply from the assistant based on prior messages.
 
@@ -81,6 +81,6 @@ def chat(request: ChatRequest) -> ChatResponse:
     - Backend forwards messages in order with a strong system prompt to OpenAI when configured.
     - Returns: {"reply": "<concise helpful answer>"}
     """
-    # Pass the request messages and optional response_style to the service
-    reply_text = generate_reply(request.messages, response_style=request.response_style)
+    # Pass the request messages and optional response_style to the service (async)
+    reply_text = await generate_reply(request.messages, response_style=request.response_style)
     return ChatResponse(reply=reply_text)

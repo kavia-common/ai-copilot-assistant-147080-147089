@@ -29,9 +29,9 @@ class ChatRequest(BaseModel):
         default=False,
         description="Whether the response should be streamed. Placeholder, not implemented in this version."
     )
-    response_style: Optional[Literal['list', 'plain']] = Field(
+    response_style: Optional[Literal['list', 'plain', 'guided']] = Field(
         default=None,
-        description="Optional hint to bias the reply style. 'list' favors bullet/concise lists; 'plain' favors short prose."
+        description="Optional hint to bias the reply style. 'list' favors bullet/concise lists; 'plain' favors short prose; 'guided' breaks how-to into steps with an example when appropriate."
     )
     # Sanity note:
     # - The 'messages' list should be ordered oldest->newest, each item like:

@@ -12,17 +12,21 @@ DEFAULT_GREETING = (
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
-# Strong, task-focused system prompt to avoid meta-advice and encourage concrete, list-style answers when requested.
+# Default, neutral, concise assistant prompt.
 SYSTEM_PROMPT_BASE = (
-    "You are an efficient, task-focused assistant. Provide direct, actionable answers without meta-advice "
-    "about how to ask questions. Be concise. When the user asks for examples, provide concrete examples. "
-    "Prefer simple formatting. Avoid disclaimers unless safety-critical."
+    "You are a helpful and concise assistant. Answer user questions clearly and directly."
 )
 
 # When the caller wants list-style replies, add a style bias.
 SYSTEM_PROMPT_LIST_HINT = (
     "When the user asks for examples or items, respond as a concise bulleted list or a short, comma-separated list. "
     "Do not add meta-instructions or commentary—just the items or brief bullets."
+)
+
+# Optional guided mode: provide steps/examples only when appropriate.
+SYSTEM_PROMPT_GUIDED = (
+    "You are a helpful assistant. If the user is asking how to do something, break it into steps and include an example. "
+    "For factual questions, respond clearly and concisely."
 )
 
 # Safety truncation limits for responses (final safeguard)
@@ -53,7 +57,7 @@ def _build_messages_for_openai(messages: List[Message], response_style: Optional
     Build the messages array for OpenAI, ensuring we start with a strong system message,
     carry forward history as-is, and include the last user message verbatim if present.
 
-    The response_style may add a format hint to bias list-style outputs.
+    The response_style may add a format hint to bias list-style outputs or guided responses.
     """
     system_prompt_parts = [SYSTEM_PROMPT_BASE]
     if response_style == "list":
@@ -62,6 +66,8 @@ def _build_messages_for_openai(messages: List[Message], response_style: Optional
         system_prompt_parts.append(
             "Format hint: For 'examples' requests, output a short, concrete list—bullets or comma-separated—no preamble."
         )
+    elif response_style == "guided":
+        system_prompt_parts.append(SYSTEM_PROMPT_GUIDED)
     system_prompt = " ".join(system_prompt_parts)
 
     wire_messages: List[dict] = [{"role": "system", "content": system_prompt}]
@@ -194,6 +200,8 @@ def _deterministic_fallback_reply(messages: List[Message], response_style: Optio
     ):
         if wants_list:
             return "- Define the goal.\n- List 2–3 concrete steps.\n- Provide one small example."
+        if response_style == "guided" or lower.startswith(("how", "help", "can you", "could you")):
+            return "- Identify the goal.\n- Break the task into 2–4 clear steps.\n- Example: Show a minimal, concrete illustration."
         return "Define the goal, list 2–3 concrete steps, and add a small example."
 
     return "Outline your goal, list 2–3 concrete actions, and include one quick example."

@@ -35,6 +35,20 @@ def health_check():
     return {"message": "Healthy"}
 
 # PUBLIC_INTERFACE
+@app.options(
+    "/api/chat",
+    summary="CORS preflight for chat",
+    description="Handle CORS preflight checks for the chat endpoint.",
+    tags=["Chat"],
+)
+def chat_preflight():
+    """
+    Handle CORS preflight request for /api/chat.
+    Returns an empty 200 so browsers can proceed with the POST.
+    """
+    return {}
+
+# PUBLIC_INTERFACE
 @app.post(
     "/api/chat",
     response_model=ChatResponse,

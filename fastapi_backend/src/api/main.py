@@ -81,6 +81,6 @@ def chat(request: ChatRequest) -> ChatResponse:
     - Backend forwards messages in order with a strong system prompt to OpenAI when configured.
     - Returns: {"reply": "<concise helpful answer>"}
     """
-    # Pass the request messages and optional response_style to the service
-    reply_text = generate_reply(request.messages, response_style=request.response_style)
+    # Pass the request.messages to the service unchanged
+    reply_text = generate_reply(request.messages)
     return ChatResponse(reply=reply_text)

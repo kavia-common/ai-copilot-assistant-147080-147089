@@ -36,8 +36,14 @@ SYSTEM_PROMPT_GUIDED = (
 # Safety truncation limits for responses (final safeguard)
 MAX_RESPONSE_CHARS = 4000
 
-# Async call timeout in seconds (conservative)
-OPENAI_CALL_TIMEOUT_S = 20.0
+# Async call timeout in seconds for OpenAI segment
+OPENAI_CALL_TIMEOUT_S = 12.0  # strict inner budget
+
+# Per-request httpx timeout (connect+read)
+HTTPX_PER_REQUEST_TIMEOUT_S = 11.5  # must be <= OPENAI_CALL_TIMEOUT_S
+
+# One quick retry backoff (exponential-ish)
+RETRY_BACKOFF_BASE_S = 0.3
 
 
 def _openai_is_configured() -> bool:
@@ -110,9 +116,40 @@ def _build_openai_payload(messages: List[Message], response_style: Optional[str]
     }
 
 
+async def _call_openai_once(
+    client: httpx.AsyncClient,
+    headers: dict,
+    payload: dict,
+) -> Optional[str]:
+    """
+    Make a single OpenAI request attempt and return the content, or None on failure.
+    """
+    resp = await client.post(OPENAI_CHAT_URL, headers=headers, json=payload)
+    if resp.status_code != 200:
+        # Log status and first 500 chars of body
+        logger.warning("OpenAI non-200: %s body=%s", resp.status_code, resp.text[:500])
+        # Allow retry on 5xx and timeouts; immediate None otherwise
+        if 500 <= resp.status_code < 600:
+            return None
+        return None
+
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    message = choices[0].get("message") or {}
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    content = content.strip()
+    if len(content) > MAX_RESPONSE_CHARS:
+        content = content[:MAX_RESPONSE_CHARS].rstrip()
+    return content
+
+
 async def _call_openai_async(messages: List[Message], response_style: Optional[str]) -> Optional[str]:
     """
-    Async call to OpenAI Chat Completions API with an asyncio timeout.
+    Async call to OpenAI Chat Completions API with a strict asyncio timeout and one quick retry.
     Returns None on any error to allow fallback behavior.
     """
     if not _openai_is_configured():
@@ -128,44 +165,61 @@ async def _call_openai_async(messages: List[Message], response_style: Optional[s
     }
     payload = _build_openai_payload(messages, response_style=response_style)
 
-    async def _do_request() -> Optional[str]:
-        # Use async client to avoid blocking the event loop
-        async with httpx.AsyncClient(timeout=OPENAI_CALL_TIMEOUT_S) as client:
-            resp = await client.post(OPENAI_CHAT_URL, headers=headers, json=payload)
-            if resp.status_code != 200:
-                logger.warning("OpenAI non-200: %s body=%s", resp.status_code, resp.text[:500])
-                return None
-            data = resp.json()
-            choices = data.get("choices") or []
-            if not choices:
-                return None
-            message = choices[0].get("message") or {}
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                return None
-            content = content.strip()
-            if len(content) > MAX_RESPONSE_CHARS:
-                content = content[:MAX_RESPONSE_CHARS].rstrip()
-            return content
+    async def _attempts() -> Optional[str]:
+        start = perf_counter()
+        attempt = 1
+        # Use async client with per-request timeout to avoid hangs
+        async with httpx.AsyncClient(timeout=HTTPX_PER_REQUEST_TIMEOUT_S) as client:
+            try:
+                content = await _call_openai_once(client, headers, payload)
+                if content is not None:
+                    elapsed_ms = int((perf_counter() - start) * 1000)
+                    logger.info("OpenAI attempt %d succeeded in %d ms", attempt, elapsed_ms)
+                    return content
 
-    start = perf_counter()
+                # One quick retry for transient issues
+                attempt += 1
+                backoff_s = RETRY_BACKOFF_BASE_S
+                await asyncio.sleep(backoff_s)
+                content = await _call_openai_once(client, headers, payload)
+                elapsed_ms = int((perf_counter() - start) * 1000)
+                if content is not None:
+                    logger.info("OpenAI attempt %d succeeded in %d ms", attempt, elapsed_ms)
+                    return content
+                logger.warning("OpenAI failed after %d attempts in %d ms", attempt, elapsed_ms)
+                return None
+            except httpx.TimeoutException:
+                elapsed_ms = int((perf_counter() - start) * 1000)
+                logger.warning("OpenAI httpx timeout after %d ms", elapsed_ms)
+                # One quick retry after small backoff if time allows; we still return None if second fails
+                try:
+                    await asyncio.sleep(RETRY_BACKOFF_BASE_S)
+                    content = await _call_openai_once(client, headers, payload)
+                    elapsed_ms = int((perf_counter() - start) * 1000)
+                    if content is not None:
+                        logger.info("OpenAI retry after timeout succeeded in %d ms", elapsed_ms)
+                        return content
+                except Exception as e:
+                    logger.exception("OpenAI retry raised after timeout: %s", str(e))
+                return None
+            except httpx.HTTPError as e:
+                elapsed_ms = int((perf_counter() - start) * 1000)
+                logger.exception("OpenAI HTTP error after %d ms: %s", elapsed_ms, str(e))
+                return None
+
+    start_total = perf_counter()
     try:
-        # Wrap in asyncio.wait_for for an extra guardrail
-        result = await asyncio.wait_for(_do_request(), timeout=OPENAI_CALL_TIMEOUT_S)
-        elapsed_ms = int((perf_counter() - start) * 1000)
-        logger.info("OpenAI call completed in %d ms", elapsed_ms)
+        # Strict overall OpenAI segment budget
+        result = await asyncio.wait_for(_attempts(), timeout=OPENAI_CALL_TIMEOUT_S)
+        elapsed_ms = int((perf_counter() - start_total) * 1000)
+        logger.info("OpenAI total segment completed in %d ms", elapsed_ms)
         return result
     except asyncio.TimeoutError:
-        elapsed_ms = int((perf_counter() - start) * 1000)
-        logger.warning("OpenAI call timed out after %d ms", elapsed_ms)
-        # Friendly fallback handled by caller via None -> fallback message.
-        return None
-    except httpx.HTTPError as e:
-        elapsed_ms = int((perf_counter() - start) * 1000)
-        logger.exception("OpenAI HTTP error after %d ms: %s", elapsed_ms, str(e))
+        elapsed_ms = int((perf_counter() - start_total) * 1000)
+        logger.warning("OpenAI segment timed out after %d ms", elapsed_ms)
         return None
     except Exception as e:
-        elapsed_ms = int((perf_counter() - start) * 1000)
+        elapsed_ms = int((perf_counter() - start_total) * 1000)
         logger.exception("OpenAI unexpected error after %d ms: %s", elapsed_ms, str(e))
         return None
 
@@ -244,6 +298,7 @@ async def generate_reply(messages: List[Message], response_style: Optional[str] 
     the OpenAI request, adds lightweight timing logs, and returns a friendly fallback
     if OpenAI is unavailable or times out.
     """
+    total_start = perf_counter()
     # Attempt OpenAI path if configured
     reply: Optional[str] = None
     if _openai_is_configured():
@@ -251,11 +306,18 @@ async def generate_reply(messages: List[Message], response_style: Optional[str] 
 
         # If timeout or error happened, provide a friendly immediate fallback message
         if reply is None:
+            elapsed_ms = int((perf_counter() - total_start) * 1000)
+            logger.info("Fallback path after OpenAI failure; total_so_far_ms=%d", elapsed_ms)
             # Friendly timeout/error fallback
             return "AI took too long to respond. Please try again."
 
     # If not configured or reply still None, use deterministic fallback
     if not reply:
-        return _deterministic_fallback_reply(messages, response_style=response_style)
+        reply_text = _deterministic_fallback_reply(messages, response_style=response_style)
+        elapsed_ms = int((perf_counter() - total_start) * 1000)
+        logger.info("Deterministic fallback reply generated in %d ms", elapsed_ms)
+        return reply_text
 
+    elapsed_ms = int((perf_counter() - total_start) * 1000)
+    logger.info("generate_reply succeeded in %d ms", elapsed_ms)
     return reply

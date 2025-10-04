@@ -1,0 +1,4 @@
+{
+    "command": "pytest",
+    "working_directory": "/home/kavia/workspace/code-generation/ai-copilot-assistant-147080-147089/fastapi_backend"
+}

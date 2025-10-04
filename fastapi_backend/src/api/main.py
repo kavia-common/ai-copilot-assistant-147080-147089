@@ -1,12 +1,12 @@
 import asyncio
 import logging
 from time import perf_counter
-from fastapi import FastAPI
+from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from src.logging_config import configure_logging
 
-from src.api.schemas import ChatRequest, ChatResponse
+from src.api.schemas import ChatRequest, ChatResponse, normalize_to_chat_request
 from src.config import settings
 from src.services.chat import generate_reply
 
@@ -66,14 +66,16 @@ def chat_preflight():
     description="Accepts a list of chat messages and returns a concise assistant reply.",
     tags=["Chat"],
 )
-async def chat(request: ChatRequest):
+async def chat(body: dict = Body(..., description="Either {'messages': [...]} or legacy {'message': '...'} payload")):
     """
     Generate a reply from the assistant based on prior messages.
 
     Parameters
     ----------
-    request : ChatRequest
-        The chat request payload including an ordered list of messages.
+    body : dict
+        The raw chat request payload. Accepted shapes:
+        - {'messages': [{role, content}, ...], 'response_style'?: 'plain'|'list'|'guided'}
+        - {'message': '...'} (legacy)
 
     Returns
     -------
@@ -82,9 +84,20 @@ async def chat(request: ChatRequest):
     """
     total_start = perf_counter()
     try:
+        # Normalize incoming payload to ChatRequest model.
+        try:
+            normalized: ChatRequest = normalize_to_chat_request(body)
+        except ValueError as ve:
+            # Defensive: downgrade Pydantic 422 to clearer 400 with simpler message
+            logger.debug("Invalid chat payload received: %s", body)
+            raise HTTPException(
+                status_code=400,
+                detail='Invalid payload: expected {"messages":[...]} or {"message":"..."}',
+            ) from ve
+
         # Route-level time budget: 13s. We always complete or fail fast within SLA.
         reply_text = await asyncio.wait_for(
-            generate_reply(request.messages, response_style=request.response_style),
+            generate_reply(normalized.messages, response_style=normalized.response_style),
             timeout=13.0,
         )
         total_ms = int((perf_counter() - total_start) * 1000)
@@ -105,6 +118,11 @@ async def chat(request: ChatRequest):
                 }
             },
         )
+    except HTTPException as he:
+        # Already sanitized 400
+        total_ms = int((perf_counter() - total_start) * 1000)
+        logger.info("Route /api/chat returned %d after %d ms", he.status_code, total_ms)
+        raise
     except Exception as e:
         total_ms = int((perf_counter() - total_start) * 1000)
         logger.exception("Route /api/chat failed after %d ms: %s", total_ms, str(e))

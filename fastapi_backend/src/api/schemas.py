@@ -1,7 +1,7 @@
 from enum import Enum
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Any, Dict
 
-from pydantic import BaseModel, Field, constr
+from pydantic import BaseModel, Field, ValidationError, constr
 
 
 # PUBLIC_INTERFACE
@@ -42,3 +42,52 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response model containing the assistant's reply as plain text."""
     reply: str = Field(..., description="The assistant's reply.")
+
+
+# PUBLIC_INTERFACE
+class ChatRequestLegacy(BaseModel):
+    """Compatibility request model for legacy payloads that send a single 'message' string."""
+    message: constr(min_length=1, max_length=5000) = Field(  # type: ignore[valid-type]
+        ..., description="Legacy single user message content."
+    )
+
+
+# PUBLIC_INTERFACE
+def normalize_to_chat_request(data: Dict[str, Any]) -> ChatRequest:
+    """Normalize incoming payload to ChatRequest.
+
+    This function accepts either:
+    - Current shape: {"messages": [{ "role": "user" | "assistant" | "system", "content": "..." }], "response_style"?: "plain"|"list"|"guided"}
+    - Legacy shape: {"message": "..."}
+
+    Returns
+    -------
+    ChatRequest
+        A validated ChatRequest instance constructed from the input.
+
+    Raises
+    ------
+    ValueError
+        If the payload does not match either accepted shape.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Payload must be a JSON object.")
+    # Prefer modern shape when messages key is present
+    if "messages" in data:
+        try:
+            return ChatRequest.model_validate(data)
+        except ValidationError as ve:
+            # Re-raise a friendlier error
+            raise ValueError(f"Invalid 'messages' payload: {ve.errors()}") from ve
+
+    # Accept legacy shape
+    if "message" in data:
+        try:
+            legacy = ChatRequestLegacy.model_validate(data)
+        except ValidationError as ve:
+            raise ValueError(f"Invalid legacy 'message' payload: {ve.errors()}") from ve
+        # Convert into modern ChatRequest with a single user message
+        return ChatRequest(messages=[Message(role=RoleEnum.user, content=legacy.message)])
+
+    # Neither shape present
+    raise ValueError("Missing required field: provide either 'messages' or 'message'.")

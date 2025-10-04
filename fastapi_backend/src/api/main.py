@@ -131,6 +131,7 @@ async def chat(
                 "hint": "Use role one of user|assistant|system and ensure 'content' is a non-empty string.",
                 "validation": str(ve),
                 "route": "/api/chat",
+                "note": "This route accepts either {message: string} or {messages: [{role, content}], response_style?}.",
             }
             raise HTTPException(status_code=400, detail=detail) from ve
 

@@ -72,21 +72,100 @@ def normalize_to_chat_request(data: Dict[str, Any]) -> ChatRequest:
     """
     if not isinstance(data, dict):
         raise ValueError("Payload must be a JSON object.")
+
+    # Lightweight compatibility shim: if a frontend sends {text: "..."} or {query: "..."},
+    # treat it as the legacy minimal shape.
+    if "message" not in data and "messages" not in data:
+        if "text" in data and isinstance(data["text"], (str, int, float)):
+            # normalize to string
+            data = {**data, "message": str(data["text"])}
+        elif "query" in data and isinstance(data["query"], (str, int, float)):
+            data = {**data, "message": str(data["query"])}
+
     # Prefer modern shape when messages key is present
     if "messages" in data:
         try:
+            # Validate that content fields are strings (avoid non-string types)
+            msgs = data.get("messages")
+            if not isinstance(msgs, list) or not msgs:
+                raise ValidationError.from_exception_data(
+                    title="ChatRequest",
+                    line_errors=[
+                        {
+                            "type": "list_too_short",
+                            "loc": ("messages",),
+                            "msg": "messages must be a non-empty array",
+                            "input": msgs,
+                            "ctx": {"min_length": 1},
+                        }
+                    ],
+                )
+            # Ensure each message.content is a string with non-whitespace
+            for idx, m in enumerate(msgs):
+                if not isinstance(m, dict):
+                    raise ValidationError.from_exception_data(
+                        title="ChatRequest",
+                        line_errors=[
+                            {
+                                "type": "model_type",
+                                "loc": ("messages", idx),
+                                "msg": "Each message must be an object",
+                                "input": m,
+                            }
+                        ],
+                    )
+                content = m.get("content")
+                if not isinstance(content, str):
+                    raise ValidationError.from_exception_data(
+                        title="ChatRequest",
+                        line_errors=[
+                            {
+                                "type": "string_type",
+                                "loc": ("messages", idx, "content"),
+                                "msg": "content must be a string",
+                                "input": content,
+                            }
+                        ],
+                    )
+                if not content.strip():
+                    raise ValidationError.from_exception_data(
+                        title="ChatRequest",
+                        line_errors=[
+                            {
+                                "type": "string_too_short",
+                                "loc": ("messages", idx, "content"),
+                                "msg": "content must be a non-empty string",
+                                "input": content,
+                                "ctx": {"min_length": 1},
+                            }
+                        ],
+                    )
             return ChatRequest.model_validate(data)
         except ValidationError as ve:
             # Re-raise a friendlier error with compact details
             errs = ve.errors()
             raise ValueError(f"Invalid 'messages' payload. Errors: {errs}") from ve
 
-    # Accept legacy shape
+    # Accept legacy/minimal shape
     if "message" in data:
         try:
-            # If provided as a non-string or only whitespace, ensure the error is explicit
             msg_val = data.get("message")
-            if isinstance(msg_val, str) and not msg_val.strip():
+            # Allow basic non-string (number/bool) but coerce to string, then validate non-empty trimmed
+            if isinstance(msg_val, (int, float, bool)):
+                msg_val = str(msg_val)
+            if not isinstance(msg_val, str):
+                raise ValidationError.from_exception_data(
+                    title="ChatRequestLegacy",
+                    line_errors=[
+                        {
+                            "type": "string_type",
+                            "loc": ("message",),
+                            "msg": "Message must be a string",
+                            "input": msg_val,
+                        }
+                    ],
+                )
+            if not msg_val.strip():
                 raise ValidationError.from_exception_data(
                     title="ChatRequestLegacy",
                     line_errors=[

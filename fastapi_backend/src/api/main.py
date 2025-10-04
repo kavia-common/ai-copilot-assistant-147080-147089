@@ -1,6 +1,8 @@
 import asyncio
 import logging
 from time import perf_counter
+from typing import Any, Dict
+
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -66,7 +68,7 @@ def chat_preflight():
     description="Accepts a list of chat messages and returns a concise assistant reply.",
     tags=["Chat"],
 )
-async def chat(body: dict = Body(..., description="Either {'messages': [...]} or legacy {'message': '...'} payload")):
+async def chat(body: Dict[str, Any] = Body(..., description="Either {'messages': [...]} or legacy {'message': '...'} payload")):
     """
     Generate a reply from the assistant based on prior messages.
 
@@ -76,6 +78,11 @@ async def chat(body: dict = Body(..., description="Either {'messages': [...]} or
         The raw chat request payload. Accepted shapes:
         - {'messages': [{role, content}, ...], 'response_style'?: 'plain'|'list'|'guided'}
         - {'message': '...'} (legacy)
+
+    Example payloads
+    ----------------
+    1) {'messages':[{'role':'user','content':'What is water?'}], 'response_style':'plain'}
+    2) {'message':'Give me examples of vegetables'}
 
     Returns
     -------
@@ -88,18 +95,44 @@ async def chat(body: dict = Body(..., description="Either {'messages': [...]} or
         try:
             normalized: ChatRequest = normalize_to_chat_request(body)
         except ValueError as ve:
-            # Defensive: downgrade Pydantic 422 to clearer 400 with simpler message
+            # Provide precise 400 with accepted shapes and validation details
             logger.debug("Invalid chat payload received: %s", body)
-            raise HTTPException(
-                status_code=400,
-                detail='Invalid payload: expected {"messages":[...]} or {"message":"..."}',
-            ) from ve
+            detail = {
+                "code": "invalid_payload",
+                "message": "Invalid payload for /api/chat.",
+                "accepted_shapes": [
+                    {"messages": [{"role": "user|assistant|system", "content": "string"}], "response_style": "plain|list|guided (optional)"},
+                    {"message": "string"},
+                ],
+                "hint": "Ensure 'content' is a non-empty string (1-5000 chars) and 'role' is one of user|assistant|system.",
+                "validation": str(ve),
+                "route": "/api/chat",
+            }
+            raise HTTPException(status_code=400, detail=detail) from ve
 
         # Route-level time budget: 13s. We always complete or fail fast within SLA.
-        reply_text = await asyncio.wait_for(
-            generate_reply(normalized.messages, response_style=normalized.response_style),
-            timeout=13.0,
-        )
+        try:
+            reply_text = await asyncio.wait_for(
+                generate_reply(normalized.messages, response_style=normalized.response_style),
+                timeout=13.0,
+            )
+        except Exception as upstream:
+            # Treat unexpected upstream errors as Bad Gateway, not as 400.
+            total_ms = int((perf_counter() - total_start) * 1000)
+            logger.exception("Upstream chat service error after %d ms: %s", total_ms, str(upstream))
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "code": "bad_gateway",
+                        "message": "Failed to obtain a reply from the AI service.",
+                        "hint": "Please try again soon.",
+                        "duration_ms": total_ms,
+                        "route": "/api/chat",
+                    }
+                },
+            )
+
         total_ms = int((perf_counter() - total_start) * 1000)
         logger.info("Route /api/chat total duration=%d ms", total_ms)
         return ChatResponse(reply=reply_text)

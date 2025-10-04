@@ -77,15 +77,16 @@ def normalize_to_chat_request(data: Dict[str, Any]) -> ChatRequest:
         try:
             return ChatRequest.model_validate(data)
         except ValidationError as ve:
-            # Re-raise a friendlier error
-            raise ValueError(f"Invalid 'messages' payload: {ve.errors()}") from ve
+            # Re-raise a friendlier error with compact details
+            errs = ve.errors()
+            raise ValueError(f"Invalid 'messages' payload. Errors: {errs}") from ve
 
     # Accept legacy shape
     if "message" in data:
         try:
             legacy = ChatRequestLegacy.model_validate(data)
         except ValidationError as ve:
-            raise ValueError(f"Invalid legacy 'message' payload: {ve.errors()}") from ve
+            raise ValueError(f"Invalid legacy 'message' payload. Errors: {ve.errors()}") from ve
         # Convert into modern ChatRequest with a single user message
         return ChatRequest(messages=[Message(role=RoleEnum.user, content=legacy.message)])
 

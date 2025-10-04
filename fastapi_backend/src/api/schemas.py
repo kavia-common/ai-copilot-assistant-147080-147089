@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from pydantic import BaseModel, Field, constr
 
@@ -29,9 +29,13 @@ class ChatRequest(BaseModel):
         default=False,
         description="Whether the response should be streamed. Placeholder, not implemented in this version."
     )
+    response_style: Optional[Literal['list', 'plain']] = Field(
+        default=None,
+        description="Optional hint to bias the reply style. 'list' favors bullet/concise lists; 'plain' favors short prose."
+    )
     # Sanity note:
     # - The 'messages' list should be ordered oldest->newest, each item like:
-    #   {"role":"user|assistant|system","content":"..."}.
+    #   {\"role\":\"user|assistant|system\",\"content\":\"...\"}.
 
 
 # PUBLIC_INTERFACE
